@@ -1,0 +1,11 @@
+numpy
+pandas
+matplotlib
+jupyter
+notebook
+ipykernel
+gymnasium
+stable-baselines3
+tensorboard
+tqdm
+rich
