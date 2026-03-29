@@ -1,0 +1,27 @@
+1. Chưa đủ 3 trạng thái Active / Sleep / Off
+
+Hiện tại mới rõ Active và Sleep, chưa có Off riêng.
+
+2. Chưa làm VM Consolidation chi tiết 100%
+
+Mới quản lý mức tổng tài nguyên/host, chưa làm kiểu VM nào chuyển sang host nào.
+
+3. Chưa chứng minh được PUE thật sự
+
+Mới tính điện năng hệ thống IT, chưa có phần điện làm mát/hạ tầng trung tâm dữ liệu.
+
+4. Chưa chứng minh được nhiệt độ và tuổi thọ phần cứng
+
+Vì code chưa có mô hình nhiệt hay hao mòn phần cứng.
+
+5. Phần mô tả/markdown còn chưa khớp code ở vài chỗ
+
+Có chỗ em sửa code rồi nhưng ghi chú vẫn cũ.
+
+6. Baseline trong code chưa giống hẳn mô tả ban đầu
+
+Code đang dùng Fixed-Keep, Threshold, BestFitLike; không phải Round Robin, Best Fit như mô tả cũ.
+
+7. Phần giải thích vì sao PPO tốt hơn còn chưa mạnh lắm
+
+Cần thêm biểu đồ/chỉ số như DVFS, power theo thời gian để chứng minh rõ hơn.
