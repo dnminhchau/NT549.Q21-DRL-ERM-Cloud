@@ -15,7 +15,7 @@
 
 ### 📈 Kết quả dự kiến
 
-- Giảm từ **15–30%** tổng điện năng tiêu thụ so với các thuật toán điều phối truyền thống (Round Robin, Best Fit).
+- Giảm từ **15–30%** tổng điện năng tiêu thụ so với các thuật toán điều phối truyền thống (Round Robin, Best Fit, Threshold, Fixed-Keep).
 - Cải thiện chỉ số **PUE** (Power Usage Effectiveness), nâng cao hiệu quả sử dụng năng lượng toàn hệ thống.
 - Đảm bảo chất lượng dịch vụ với tỷ lệ vi phạm **SLA** thấp hoặc tương đương các phương pháp hiện tại.
 - Giảm nhiệt độ hoạt động và kéo dài tuổi thọ phần cứng nhờ phân bổ tải và quản lý nguồn thông minh.
@@ -38,3 +38,12 @@ Do kích thước file quá lớn (>100MB), dataset không được lưu trực 
 | 1 | Đoàn Ngọc Minh Châu | 23521068 | 235120168@gm.uit.edu.vn |
 | 2 | Huỳnh Thị Phương Nghi | 23521001 | 23521001@gm.uit.edu.vn |
 | 3 | Võ Thị Hồng Phúc | 23521226 | 23521226@gm.uit.edu.vn |
+
+
+## ✅ Cập nhật phạm vi mô phỏng hiện tại
+
+- Môi trường trong `src/energy_env.py` đã có đủ 3 trạng thái host: **Active / Sleep / Off**.
+- Đã bổ sung VM consolidation theo từng VM nhỏ (bin-packing xấp xỉ) và đếm migration mỗi timestep.
+- Đã tách công suất **IT power** và **Facility power**, đồng thời tính **PUE** để đánh giá mức trung tâm dữ liệu.
+- Đã bổ sung mô hình nhiệt độ host và chỉ số hao mòn phần cứng (wear index) theo quy tắc Q10.
+- Baseline hiện tại khớp với code: **RoundRobin / BestFit / Threshold / Fixed-Keep**.
