@@ -13,10 +13,17 @@
   Notebook để train PPO, chạy baseline và đánh giá kết quả
 
 - `src/energy_env.py`  
-  Môi trường mô phỏng cloud energy
+  Môi trường mô phỏng cloud energy có:
+  - trạng thái host **Active / Sleep / Off**
+  - mô phỏng **VM consolidation** theo từng VM nhỏ + đếm migration
+  - tách **IT power** và **Facility power**, tính **PUE**
+  - mô hình nhiệt độ host + chỉ số hao mòn phần cứng
 
 - `src/baselines.py`  
-  Các baseline cơ bản: Fixed, Threshold, BestFitLike
+  Các baseline chính: **RoundRobin**, **BestFit**, **Threshold**, **Fixed-Keep**
+
+- `src/analysis_utils.py`
+  Hàm xuất biểu đồ để giải thích vì sao PPO tốt hơn (DVFS, power theo thời gian, PUE/nhiệt độ/hao mòn)
 
 - `src/azure_workload_utils.py`  
   Hàm chuyển từ SQLite sang workload CSV
@@ -57,8 +64,24 @@ Notebook này sẽ:
 - đọc `workload_real.csv`
 - tạo môi trường RL
 - train PPO
-- so sánh với baseline
+- so sánh với baseline (RoundRobin / BestFit / Threshold / Fixed)
 - lưu bảng kết quả và biểu đồ
+
+### Bước 4. Xuất biểu đồ phân tích PPO
+Sau khi chạy xong một episode, dùng `env.trace`:
+
+```python
+from src.analysis_utils import trace_to_dataframe, export_core_plots
+
+df_trace = trace_to_dataframe(env.trace)
+paths = export_core_plots(df_trace, "outputs")
+print(paths)
+```
+
+Sẽ tạo 3 biểu đồ:
+- `demand_dvfs_over_time.png`
+- `it_vs_facility_power.png`
+- `pue_temperature_wear.png`
 
 ## Gợi ý cho AzurePackingTraceV1
 Với file AzurePackingTraceV1, cách đơn giản và hợp lý nhất là:
@@ -81,26 +104,21 @@ Vì vậy notebook đang dùng cửa sổ:
 
 => tổng cộng `336` timestep.
 
-## Kết quả ban đầu mong đợi
-Sau khi chạy notebook 2, bạn sẽ có:
-- model PPO (`.zip`)
-- file kết quả `.csv`
-- biểu đồ so sánh energy
-- biểu đồ so sánh SLA
-
 ## Lưu ý quan trọng
 Bộ code này là **khung làm đúng hướng và chạy được**, nhưng để ra kết quả đẹp hơn bạn vẫn nên:
 - tăng `total_timesteps`
 - chỉnh reward nếu PPO chưa tiết kiệm điện tốt
 - chạy nhiều seed khác nhau rồi lấy trung bình
 - viết báo cáo giải thích cách dựng workload từ Azure
+- bổ sung phần hiệu chỉnh PUE theo điều kiện DC thật nếu có dữ liệu đo thực
 
 ## Mẹo cho người mới
 Nếu bạn là "tờ giấy trắng", hãy đi đúng thứ tự:
 1. Chạy notebook 1 cho ra `workload_real.csv`
 2. Nhìn biểu đồ workload xem có hợp lý không
 3. Chạy notebook 2 để train
-4. Xem bảng kết quả
-5. Mới bắt đầu chỉnh tham số
+4. So sánh bảng metrics (energy/SLA/PUE/temp/migrations)
+5. Xuất biểu đồ phân tích bằng `analysis_utils`
+6. Mới bắt đầu chỉnh tham số
 
 Chỉ cần đi đúng thứ tự này là không bị loạn.
