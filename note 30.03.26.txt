@@ -25,3 +25,24 @@ Code đang dùng Fixed-Keep, Threshold, BestFitLike; không phải Round Robin, 
 7. Phần giải thích vì sao PPO tốt hơn còn chưa mạnh lắm
 
 Cần thêm biểu đồ/chỉ số như DVFS, power theo thời gian để chứng minh rõ hơn.
+
+* FIx TẾP 2/4/2024
+Cần fix tiếp:
+
+làm PPO tốt hơn RoundRobin bằng cách chỉnh reward nhẹ + train lâu hơn
+sửa baselines.py cho sạch và đổi BestFitLike thành BestFit
+sửa notebook để xuất đủ metric mới
+thêm biểu đồ PUE, nhiệt độ, host, migration
+cập nhật README cho khớp với code và nói rõ đây là academic simulation
+
+Không cần fix lớn nữa:
+
+energy_env.py phần lõi
+logic PPO/SLA hiện tại
+
+Nếu bé muốn, anh có thể viết tiếp cho bé một bản checklist từng file sửa gì theo format cực ngắn kiểu:
+
+file nào
+sửa gì
+ưu tiên mấy
+để bé tick từng cái luôn.
