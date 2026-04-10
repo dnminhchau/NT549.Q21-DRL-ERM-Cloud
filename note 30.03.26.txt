@@ -46,3 +46,15 @@ file nào
 sửa gì
 ưu tiên mấy
 để bé tick từng cái luôn.
+
+*Fix Tiếp 10/4/2026
+Cần fix tiếp 
+
+Cần bổ sung cơ chế phạt DVFS cao trực tiếp trong reward
+Cần bổ sung cơ chế phạt DVFS cao trực tiếp trong reward
+Cần làm cho policy thay đổi linh hoạt theo tải, thay vì giữ nguyên một cấu hình cố định
+
+KHÔNG CÂNF FIX nữa
+mô hình trạng thái host
+reset workload
+nhiệt độ, aging hay migration
