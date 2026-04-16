@@ -68,3 +68,19 @@ thêm mục hạn chế của mô hình
 bổ sung 1–2 biểu đồ giải thích hành vi policy
 
 Còn về code/train, mình nghĩ nên dừng ở đây.
+
+*** NHẬN XÉT 17.04.2026
+
+Đồng bộ lại markdown/comment/README cho khớp code thật.
+Chốt 1 cấu hình cuối rồi rerun sạch notebook từ đầu.
+Giữ 1 bộ kết quả cuối: energy, SLA, avg active hosts, avg DVFS, switches.
+Thêm 2–4 biểu đồ giải thích hành vi PPO: DVFS / power / active hosts / SLA theo thời gian.
+Viết rõ hạn chế mô hình: chưa migration chi tiết, chưa cloud thật hoàn toàn, vài phần là mô phỏng.
+Nếu còn thời gian, chạy thêm 2–3 seed; không cần ôm migration chi tiết hoặc dataset mới nữa.
+
+* Nếu còn thời gian, nhóm mình có thể bổ sung migration ở mức đơn giản để bài khớp hơn với ý 
+VM Consolidation. Cụ thể, khi giảm số host active thì giả lập rằng một số VM được migrate từ 
+host cũ sang host còn hoạt động, đồng thời cộng thêm migration_count hoặc migration_penalty vào reward. 
+Làm vậy thì bài sẽ hợp hơn với yêu cầu ‘hợp nhất máy ảo’, giải thích được rõ hơn vì sao tắt bớt host 
+vẫn giữ được tải, và phần báo cáo cũng thuyết phục hơn. Tuy nhiên không nhất thiết phải làm migration 
+chi tiết từng VM, vì phần đó khá tốn thời gian.
