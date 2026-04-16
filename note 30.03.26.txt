@@ -58,3 +58,13 @@ KHÔNG CÂNF FIX nữa
 mô hình trạng thái host
 reset workload
 nhiệt độ, aging hay migration
+
+**** 15/4/2026
+Để hoàn chỉnh hơn, bạn nên làm:
+
+đồng bộ lại phần mô tả reward trong báo cáo
+kiểm tra trace để xác nhận policy không còn giữ cấu hình cố định
+thêm mục hạn chế của mô hình
+bổ sung 1–2 biểu đồ giải thích hành vi policy
+
+Còn về code/train, mình nghĩ nên dừng ở đây.

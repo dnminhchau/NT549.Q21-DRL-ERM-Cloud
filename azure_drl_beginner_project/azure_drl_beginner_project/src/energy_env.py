@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import gymnasium as gym
@@ -36,6 +36,11 @@ class EnvConfig:
     reward_w_sleep_excess: float = 0.22
     reward_w_off_bonus: float = 0.10
 
+    # Mới thêm
+    reward_w_dvfs: float = 0.30
+    reward_w_dvfs_mismatch: float = 0.35
+    reward_w_sticky_config: float = 0.15
+
     target_host_util: float = 0.82
     reserve_sleep_hosts: int = 1
 
@@ -59,8 +64,6 @@ class EnvConfig:
     seed: int = 42
 
 
-
-
 class CloudEnergyEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 4}
 
@@ -80,6 +83,7 @@ class CloudEnergyEnv(gym.Env):
         super().__init__()
         self.config = config or EnvConfig()
         self.workload = np.asarray(workload, dtype=np.float32).reshape(-1)
+
         if self.workload.size < self.config.episode_length + 1:
             raise ValueError(
                 f"Workload quá ngắn: cần ít nhất {self.config.episode_length + 1} điểm, "
@@ -93,15 +97,25 @@ class CloudEnergyEnv(gym.Env):
             high=np.full(14, 2.5, dtype=np.float32),
             dtype=np.float32,
         )
+
         self.start_idx = 0
         self.step_idx = 0
         self.dvfs_idx = min(2, len(self.config.dvfs_levels) - 1)
+
         self.host_status = np.zeros(self.config.max_hosts, dtype=np.int8)
         self.host_loads = np.zeros(self.config.max_hosts, dtype=np.float32)
-        self.host_temps = np.full(self.config.max_hosts, self.config.ambient_temp_c, dtype=np.float32)
+        self.host_temps = np.full(
+            self.config.max_hosts,
+            self.config.ambient_temp_c,
+            dtype=np.float32,
+        )
         self.host_age = np.zeros(self.config.max_hosts, dtype=np.float32)
         self.prev_assignment: dict[int, int] = {}
-       
+
+        # Sticky-config tracking
+        self.prev_active_hosts = 0
+        self.prev_dvfs = float(self.dvfs)
+        self.same_config_steps = 0
 
         self.last_power_it = 0.0
         self.last_power_total = 0.0
@@ -112,9 +126,11 @@ class CloudEnergyEnv(gym.Env):
         self.last_temp = self.config.ambient_temp_c
         self.last_lifetime_penalty = 0.0
         self.trace: list[dict[str, Any]] = []
+
     @property
     def dvfs(self) -> float:
         return self.config.dvfs_levels[self.dvfs_idx]
+
     @property
     def active_hosts(self) -> int:
         return int(np.sum(self.host_status == self.STATUS_ACTIVE))
@@ -126,13 +142,14 @@ class CloudEnergyEnv(gym.Env):
     @property
     def off_hosts(self) -> int:
         return int(np.sum(self.host_status == self.STATUS_OFF))
-    
+
     def _get_demand(self, offset: int = 0) -> float:
         idx = min(self.start_idx + self.step_idx + offset, self.workload.size - 1)
         return float(self.workload[idx])
 
     def _cluster_capacity(self) -> float:
         return self.active_hosts * self.config.host_nominal_capacity * self.dvfs
+
     def _host_capacity(self, dvfs: float | None = None) -> float:
         dvfs_value = self.dvfs if dvfs is None else float(dvfs)
         return self.config.host_nominal_capacity * dvfs_value
@@ -149,6 +166,7 @@ class CloudEnergyEnv(gym.Env):
         max_allowable = max(0, self.config.max_hosts - self._desired_active_hosts(demand_now))
         reserve = min(reserve, max_allowable)
         return int(max(self.config.min_sleep_hosts, reserve))
+
     def _active_indices(self) -> np.ndarray:
         return np.flatnonzero(self.host_status == self.STATUS_ACTIVE)
 
@@ -166,16 +184,15 @@ class CloudEnergyEnv(gym.Env):
         else:
             desired_active = self._desired_active_hosts(
                 float(demand),
-                dvfs=self.config.dvfs_levels[self.dvfs_idx]
+                dvfs=self.config.dvfs_levels[self.dvfs_idx],
             )
 
-        # luôn chừa tối thiểu 1 host cho sleep/off nếu có thể
         initial_active = min(desired_active, self.config.max_hosts - 1)
         initial_active = max(self.config.min_active_hosts, initial_active)
 
         initial_sleep = min(
             max(self.config.reserve_sleep_hosts, self.config.min_sleep_hosts),
-            max(0, self.config.max_hosts - initial_active)
+            max(0, self.config.max_hosts - initial_active),
         )
 
         active_idx = np.arange(initial_active)
@@ -194,7 +211,6 @@ class CloudEnergyEnv(gym.Env):
         wake_from_off = 0
 
         if action == self.ACTION_WAKE_ONE:
-            # chỉ wake từ SLEEP -> ACTIVE
             sleep_idx = self._sleep_indices()
             if sleep_idx.size > 0:
                 self.host_status[int(sleep_idx[0])] = self.STATUS_ACTIVE
@@ -223,7 +239,6 @@ class CloudEnergyEnv(gym.Env):
                 switches += 1
 
         elif action == self.ACTION_BOOT_ONE:
-            # boot trực tiếp OFF -> ACTIVE để OFF thành trạng thái dùng được thật
             off_idx = self._off_indices()
             if off_idx.size > 0:
                 self.host_status[int(off_idx[0])] = self.STATUS_ACTIVE
@@ -238,8 +253,6 @@ class CloudEnergyEnv(gym.Env):
         n_vms = max(1, int(np.ceil(demand / max(self.config.vm_unit_demand, 1e-6))))
         base = demand / n_vms
         return np.full(n_vms, base, dtype=np.float32)
-
-    
 
     def _pack_vms(
         self, vm_demands: np.ndarray
@@ -274,14 +287,17 @@ class CloudEnergyEnv(gym.Env):
             previous_host = self.prev_assignment.get(vm_id)
             if previous_host is not None and previous_host != host:
                 migrations += 1
-                migration_plan.append({
-                    "vm_id": int(vm_id),
-                    "from": int(previous_host),
-                    "to": int(host),
-                    "demand": float(demand_unit),
-                })
+                migration_plan.append(
+                    {
+                        "vm_id": int(vm_id),
+                        "from": int(previous_host),
+                        "to": int(host),
+                        "demand": float(demand_unit),
+                    }
+                )
 
         return host_loads, assignment, migration_plan, migrations
+
     def _update_temperatures(self):
         for i in range(self.config.max_hosts):
             if self.host_status[i] == self.STATUS_ACTIVE:
@@ -308,16 +324,20 @@ class CloudEnergyEnv(gym.Env):
         lifetime_penalty = 0.0
         for i in range(self.config.max_hosts):
             temp = float(self.host_temps[i])
+
             if self.host_status[i] == self.STATUS_OFF:
                 self.host_age[i] += 0.15 * self.config.aging_per_step_base
                 continue
 
             thermal_excess = max(0.0, temp - self.config.aging_temp_threshold_c)
-            aging_increment = self.config.aging_per_step_base * (1.0 + self.config.aging_temp_factor * thermal_excess)
+            aging_increment = self.config.aging_per_step_base * (
+                1.0 + self.config.aging_temp_factor * thermal_excess
+            )
             self.host_age[i] += aging_increment
             lifetime_penalty += max(0.0, aging_increment - self.config.aging_per_step_base)
+
         return float(lifetime_penalty)
-    
+
     def _compute_power(self, demand: float) -> tuple[float, float, float, np.ndarray, float, float]:
         active_idx = self._active_indices()
         host_utils = np.zeros(self.config.max_hosts, dtype=np.float32)
@@ -349,7 +369,9 @@ class CloudEnergyEnv(gym.Env):
         cooling_multiplier = (
             self.config.base_pue
             + self.config.cooling_alpha * mean_util
-            + self.config.cooling_beta * max(0.0, (avg_active_temp - self.config.reference_temp_c) / 30.0)
+            + self.config.cooling_beta * max(
+                0.0, (avg_active_temp - self.config.reference_temp_c) / 30.0
+            )
         )
         cooling_multiplier = max(cooling_multiplier, 1.0)
 
@@ -365,11 +387,42 @@ class CloudEnergyEnv(gym.Env):
             float(estimated_pue),
             float(cooling_power),
         )
+
     def _sla_violation(self, demand: float) -> float:
         cap = self._cluster_capacity()
         if cap <= 0:
             return 1.0
         return float(max(0.0, demand - cap) / max(demand, 1e-8))
+
+    def _dvfs_penalty(self, demand: float, mean_util: float) -> tuple[float, float, float]:
+        dvfs_min = float(min(self.config.dvfs_levels))
+        dvfs_max = float(max(self.config.dvfs_levels))
+        dvfs_norm = (self.dvfs - dvfs_min) / max(dvfs_max - dvfs_min, 1e-8)
+
+        if self.active_hosts <= 0:
+            desired_dvfs = dvfs_min
+        else:
+            desired_dvfs = demand / max(
+                self.active_hosts * self.config.host_nominal_capacity * self.config.target_host_util,
+                1e-8,
+            )
+            desired_dvfs = float(np.clip(desired_dvfs, dvfs_min, dvfs_max))
+
+        desired_norm = (desired_dvfs - dvfs_min) / max(dvfs_max - dvfs_min, 1e-8)
+
+        high_dvfs_penalty = dvfs_norm ** 2
+        mismatch_penalty = abs(dvfs_norm - desired_norm)
+
+        low_load_factor = float(np.clip((0.75 - demand) / 0.75, 0.0, 1.0))
+        low_util_factor = float(np.clip((0.80 - mean_util) / 0.80, 0.0, 1.0))
+        extra_idle_penalty = dvfs_norm * max(low_load_factor, low_util_factor)
+
+        total_penalty = (
+            0.45 * high_dvfs_penalty
+            + 0.35 * mismatch_penalty
+            + 0.20 * extra_idle_penalty
+        )
+        return float(total_penalty), float(desired_dvfs), float(mismatch_penalty)
 
     def _observation(self) -> np.ndarray:
         demand_now = self._get_demand(0)
@@ -427,8 +480,15 @@ class CloudEnergyEnv(gym.Env):
 
         demand = self._get_demand(0)
         self._reset_hosts(demand)
+
+        # Phải đặt sau _reset_hosts()
+        self.prev_active_hosts = int(self.active_hosts)
+        self.prev_dvfs = float(self.dvfs)
+        self.same_config_steps = 0
+
         vm_demands = self._build_vm_demands(demand)
         self.host_loads, self.prev_assignment, _, self.last_migrations = self._pack_vms(vm_demands)
+
         self._update_temperatures()
         self.last_lifetime_penalty = self._update_age()
         self.last_power_it, self.last_power_total, _, _, self.last_pue, _ = self._compute_power(demand)
@@ -436,6 +496,7 @@ class CloudEnergyEnv(gym.Env):
         self.last_switches = 0
         self.last_temp = float(np.mean(self.host_temps))
         self.trace = []
+
         return self._observation(), {}
 
     def step(self, action: int):
@@ -454,6 +515,17 @@ class CloudEnergyEnv(gym.Env):
         power_it, power_total, mean_util, host_utils, pue, cooling_power = self._compute_power(demand)
         sla = self._sla_violation(demand)
 
+        # Sticky-config penalty: phải tính trước reward
+        if int(self.active_hosts) == int(self.prev_active_hosts) and float(self.dvfs) == float(self.prev_dvfs):
+            self.same_config_steps += 1
+        else:
+            self.same_config_steps = 0
+
+        sticky_config_penalty = min(self.same_config_steps / 20.0, 1.0)
+
+        self.prev_active_hosts = int(self.active_hosts)
+        self.prev_dvfs = float(self.dvfs)
+
         normalized_energy = power_total / (
             self.config.max_hosts * self.config.p_peak * max(self.config.dvfs_levels) ** 2
             + self.config.cooling_fixed_power
@@ -463,24 +535,26 @@ class CloudEnergyEnv(gym.Env):
         balanced_util_bonus = max(0.0, 1.0 - abs(mean_util - 0.78) / 0.78)
 
         avg_temp = float(np.mean(self.host_temps))
-        thermal_penalty = max(
-            0.0,
-            avg_temp - self.config.reference_temp_c
-        ) / max(
-            self.config.max_safe_temp_c - self.config.reference_temp_c,
-            1.0
+        thermal_penalty = max(0.0, avg_temp - self.config.reference_temp_c) / max(
+            self.config.max_safe_temp_c - self.config.reference_temp_c, 1.0
         )
 
         cap = self._cluster_capacity()
         spare_ratio = max(0.0, cap - demand) / max(cap, 1e-8)
         overprovision_penalty = max(0.0, spare_ratio - 0.05)
 
+        dvfs_penalty, desired_dvfs, dvfs_mismatch = self._dvfs_penalty(demand, mean_util)
+
         demand_next = self._get_demand(1)
         desired_active = self._desired_active_hosts(demand)
         desired_sleep = self._desired_sleep_hosts(demand, demand_next)
 
-        active_excess_penalty = max(0.0, self.active_hosts - desired_active) / max(self.config.max_hosts, 1)
-        sleep_excess_penalty = max(0.0, self.sleep_hosts - desired_sleep) / max(self.config.max_hosts, 1)
+        active_excess_penalty = max(0.0, self.active_hosts - desired_active) / max(
+            self.config.max_hosts, 1
+        )
+        sleep_excess_penalty = max(0.0, self.sleep_hosts - desired_sleep) / max(
+            self.config.max_hosts, 1
+        )
 
         wake_penalty = 0.0
         if action in (self.ACTION_WAKE_ONE, self.ACTION_BOOT_ONE) and self.active_hosts > desired_active:
@@ -507,8 +581,11 @@ class CloudEnergyEnv(gym.Env):
             + self.config.reward_w_temp * thermal_penalty
             + self.config.reward_w_lifetime * lifetime_penalty / max(self.config.max_hosts, 1)
             + self.config.reward_w_overprovision * overprovision_penalty
+            + self.config.reward_w_dvfs * dvfs_penalty
+            + self.config.reward_w_dvfs_mismatch * dvfs_mismatch
             + self.config.reward_w_active_excess * active_excess_penalty
             + self.config.reward_w_sleep_excess * sleep_excess_penalty
+            + self.config.reward_w_sticky_config * sticky_config_penalty
             + 0.30 * wake_penalty
         ) + self.config.reward_w_util * (
             0.65 * utilization_bonus + 0.35 * balanced_util_bonus
@@ -520,6 +597,11 @@ class CloudEnergyEnv(gym.Env):
             reward -= 8.0
 
         info = {
+            "dvfs_penalty": dvfs_penalty,
+            "desired_dvfs": desired_dvfs,
+            "dvfs_mismatch": dvfs_mismatch,
+            "sticky_config_penalty": sticky_config_penalty,
+            "same_config_steps": self.same_config_steps,
             "demand": demand,
             "power_it": power_it,
             "power": power_total,
@@ -564,11 +646,16 @@ class CloudEnergyEnv(gym.Env):
         self.last_migrations = migrations
         self.last_temp = avg_temp
         self.last_lifetime_penalty = lifetime_penalty
-        self.step_idx += 1
 
+        self.step_idx += 1
         terminated = self.step_idx >= self.config.episode_length
         truncated = False
-        obs = self._observation() if not terminated else np.zeros(self.observation_space.shape, dtype=np.float32)
+
+        obs = (
+            self._observation()
+            if not terminated
+            else np.zeros(self.observation_space.shape, dtype=np.float32)
+        )
         return obs, float(reward), terminated, truncated, info
 
     def render(self):
