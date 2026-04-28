@@ -84,3 +84,65 @@ host cũ sang host còn hoạt động, đồng thời cộng thêm migration_co
 Làm vậy thì bài sẽ hợp hơn với yêu cầu ‘hợp nhất máy ảo’, giải thích được rõ hơn vì sao tắt bớt host 
 vẫn giữ được tải, và phần báo cáo cũng thuyết phục hơn. Tuy nhiên không nhất thiết phải làm migration 
 chi tiết từng VM, vì phần đó khá tốn thời gian.
+
+*** NHẬN XÉT 28.04.2O26 ***
+1) Nhận xét project hiện tại
+- PPO giảm tổng năng lượng tốt nhờ giảm số host active, dùng Sleep/Off và DVFS.
+- PUE của PPO cao hơn một số baseline nhưng không phải lỗi chính. Vì PUE là tỷ số giữa tổng năng lượng trung tâm dữ liệu và năng lượng IT; 
+khi năng lượng IT giảm mạnh nhưng phần cooling/overhead không giảm tương ứng thì PUE có thể tăng. The Green Grid định nghĩa 
+PUE là Total Facility Energy / IT Equipment Energy, 
+và cũng lưu ý PUE không phải thước đo toàn diện duy nhất cho hiệu quả hệ thống.
+- SLA violation trung bình của PPO khoảng 0.53%, mức thấp và có thể chấp nhận trong mô phỏng VM Consolidation, nhưng chưa tốt hơn BestFit.
+- Trade-off chính: PPO tiết kiệm năng lượng tốt hơn, đổi lại PUE chưa tối ưu và vẫn có SLA violation nhỏ.
+Kết luận: Đồ án đạt mục tiêu chính về giảm tổng năng lượng, nhưng cần ghi rõ đây là mô phỏng học thuật và chưa tối ưu hoàn toàn về PUE/SLA.
+
+2) Cách biện luận
+a) Về PUE:
+PPO giảm mạnh năng lượng IT bằng VM Consolidation, Sleep/Off và DVFS. Tuy nhiên, do mô hình vẫn có phần cooling/overhead cố định, PUE có thể tăng dù tổng năng lượng giảm. Vì vậy, nên biện luận: PPO cải thiện tổng năng lượng tiêu thụ, nhưng chưa tối ưu chỉ số PUE.
+
+b) Về SLA:
+Dynamic VM Consolidation luôn có trade-off giữa tiết kiệm năng lượng và duy trì SLA. Các nghiên cứu như Beloglazov & Buyya và E2SVM đều xem SLA-aware VM consolidation là bài toán cân bằng giữa energy consumption và SLA violation.
+Vì vậy, SLA violation trung bình khoảng 0.53% của PPO có thể xem là chấp nhận được trong mô phỏng, miễn là báo cáo ghi rõ đây là đánh đổi để tiết kiệm năng lượng.
+
+3) Có cần sửa code nữa không?
+- Không nên chỉnh code lớn hoặc train lại nếu kết quả hiện tại đã ổn.
+- Chỉ cần đồng bộ README/markdown/báo cáo với code thật.
+- Chốt một bộ kết quả cuối, rerun notebook sạch và lưu lại bảng metric + biểu đồ dashboard.
+
+4) Cần cải thiện những gì?
+Cần khắc phục trước khi nộp
+Sửa README cho khớp project hiện tại
+README còn nhắc 02_train_evaluate_ppo.ipynb, nhưng zip hiện có 03_train_ppo_multiphase.ipynb.
+Cần ghi đúng baseline: Fixed-Keep, RoundRobin, Threshold, BestFit, PPO.
+Ghi rõ PUE chưa cải thiện
+Không viết “PPO cải thiện PUE”.
+Viết: PPO giảm total energy nhưng PUE chưa tối ưu do cooling/overhead không giảm tương ứng.
+Ghi rõ SLA là trade-off
+PPO SLA trung bình khoảng 0.53%, chấp nhận được.
+Nhưng BestFit = 0% SLA, nên không được nói PPO tốt nhất về SLA.
+Ghi rõ energy saving
+PPO đạt 22.89% so với RoundRobin → đạt yêu cầu 15–30%.
+Nhưng chỉ đạt 11.29% so với BestFit → chưa đạt tuyệt đối nếu so với baseline mạnh nhất.
+Thêm hạn chế mô hình
+Mô phỏng học thuật, chưa phải cloud thật.
+Workload Azure đã xử lý/rescale.
+VM Consolidation có mô phỏng migration nhưng chưa chi tiết như hệ thống thật.
+Chỉ có một seed chính, chưa chạy nhiều seed.
+Có cần sửa code không?
+
+Không cần sửa code lớn nữa.
+Chỉ sửa nếu có lỗi nhỏ như:
+
+dashboard đọc sai file;
+notebook chưa rerun sạch;
+tên baseline chưa thống nhất;
+output/figure chưa lưu đủ;
+README/markdown lệch với code.
+Nếu chấm điểm
+Nếu báo cáo biện luận tốt: khoảng 8.0 – 8.5/10.
+Nếu thầy rất gắt về PUE và BestFit: khoảng 7.5 – 8.0/10.
+Nếu sửa sạch README, chốt output, thêm biểu đồ và hạn chế rõ ràng: có thể lên khoảng 8.5/10.
+Chốt ngắn
+
+Project hiện tại đủ để nộp, không nên train/sửa PPO thêm. Việc quan trọng nhất bây giờ là viết báo cáo trung thực, biện luận PUE/SLA cho chắc, và đồng bộ README/notebook/output.
+
