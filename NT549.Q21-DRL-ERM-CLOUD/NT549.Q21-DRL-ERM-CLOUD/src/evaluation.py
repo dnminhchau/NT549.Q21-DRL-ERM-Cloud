@@ -27,7 +27,11 @@ def trace_to_dataframe(trace: list[dict]) -> pd.DataFrame:
                 "max_temp": item.get("max_temp", 0.0),
                 "switches": item.get("switches", 0),
                 "migrations": item.get("migrations", 0),
+                "migration_cost": item.get("migration_cost", 0.0),
+                "migration_events": item.get("migration_events", item.get("migration_plan", [])),
+                "uses_vm_snapshots": item.get("uses_vm_snapshots", False),
                 "mean_host_age": item.get("mean_host_age", 0.0),
+                "latency_penalty": item.get("latency_penalty", 0.0),
             }
         )
     return pd.DataFrame(rows)
@@ -47,6 +51,8 @@ def save_trace_artifacts(trace: list[dict], output_dir: str | Path, prefix: str 
         ("avg_temp", "Nhiệt độ trung bình theo thời gian"),
         ("active_hosts", "Số host active theo thời gian"),
         ("migrations", "Số migration theo thời gian"),
+        ("migration_cost", "Chi phí migration theo thời gian"),
+        ("latency_penalty", "Latency penalty theo thời gian"),
         ("power_it", "IT power theo thời gian"),
         ("off_hosts", "Số host off theo thời gian"),
         ("sleep_hosts", "Số host sleep theo thời gian"),
@@ -54,6 +60,8 @@ def save_trace_artifacts(trace: list[dict], output_dir: str | Path, prefix: str 
         ("mean_host_age", "Tuổi thọ hao mòn trung bình theo thời gian"),
     ]
     for col, title in charts:
+        if col not in df.columns:
+            continue
         plt.figure(figsize=(10, 4))
         plt.plot(df["step"], df[col])
         plt.title(title)

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
 import numpy as np
+import pandas as pd
 from gymnasium import spaces
 
 
@@ -20,26 +22,31 @@ class EnvConfig:
     p_idle: float = 80.0
     p_peak: float = 200.0
     p_sleep: float = 10.0
-    p_off: float = 1.0
-    host_switch_cost: float = 8.0
+    p_off: float = 0.3
+    host_switch_cost: float = 5.0
+
     migration_cost: float = 1.5
 
-    reward_w_energy: float = 1.0
-    reward_w_sla: float = 3.2
-    reward_w_switch: float = 0.15
-    reward_w_migration: float = 0.05
-    reward_w_util: float = 0.20
-    reward_w_temp: float = 0.10
-    reward_w_lifetime: float = 0.05
-    reward_w_overprovision: float = 0.60
-    reward_w_active_excess: float = 0.55
-    reward_w_sleep_excess: float = 0.22
-    reward_w_off_bonus: float = 0.10
+    priority_migration_multiplier: float = 3.0   
+    memory_migration_scale: float = 0.01          
+    migration_max_size_factor: float = 5.0        
 
-    # Mới thêm
-    reward_w_dvfs: float = 0.30
-    reward_w_dvfs_mismatch: float = 0.35
-    reward_w_sticky_config: float = 0.15
+    reward_w_energy: float = 1.60
+    reward_w_sla: float = 4.50
+    reward_w_switch: float = 0.08
+    reward_w_migration: float = 0.10
+    reward_w_latency: float = 0.35
+    reward_w_util: float = 0.18
+    reward_w_temp: float = 0.18
+    reward_w_lifetime: float = 0.08
+    reward_w_overprovision: float = 0.90
+    reward_w_active_excess: float = 1.10
+    reward_w_sleep_excess: float = 0.30
+    reward_w_off_bonus: float = 0.30
+
+    reward_w_dvfs: float = 0.55
+    reward_w_dvfs_mismatch: float = 0.45
+    reward_w_sticky_config: float = 0.03
 
     target_host_util: float = 0.82
     reserve_sleep_hosts: int = 1
@@ -61,6 +68,21 @@ class EnvConfig:
     aging_temp_factor: float = 0.03
 
     vm_unit_demand: float = 0.10
+    vm_snapshot_path: str | None = None
+    vm_snapshot_max_chunks_per_type: int = 8
+    vm_snapshot_min_group_demand: float = 1e-5
+    obs_clip_high: float = 2.5
+    obs_memory_percentile: float = 95.0
+    latency_util_clip: float = 0.95
+    latency_cap: float = 10.0
+
+    sla_extra_threshold_1: float = 0.05
+    sla_extra_penalty_1: float = 1.00
+    sla_extra_threshold_2: float = 0.15
+    sla_extra_penalty_2: float = 2.50
+    sla_penalty_growth_threshold: float = 0.10
+    sla_penalty_growth_factor: float = 5.00
+
     seed: int = 42
 
 
@@ -91,10 +113,14 @@ class CloudEnergyEnv(gym.Env):
             )
 
         self.rng = np.random.default_rng(self.config.seed)
+        self.vm_snapshots = self._load_vm_snapshots(self.config.vm_snapshot_path)
+        self.uses_vm_snapshots = bool(self.vm_snapshots)
+        self.obs_memory_scale = self._estimate_memory_scale()
+
         self.action_space = spaces.Discrete(7)
         self.observation_space = spaces.Box(
-            low=np.zeros(14, dtype=np.float32),
-            high=np.full(14, 2.5, dtype=np.float32),
+            low=np.zeros(17, dtype=np.float32),
+            high=np.full(17, self.config.obs_clip_high, dtype=np.float32),
             dtype=np.float32,
         )
 
@@ -112,7 +138,6 @@ class CloudEnergyEnv(gym.Env):
         self.host_age = np.zeros(self.config.max_hosts, dtype=np.float32)
         self.prev_assignment: dict[int, int] = {}
 
-        # Sticky-config tracking
         self.prev_active_hosts = 0
         self.prev_dvfs = float(self.dvfs)
         self.same_config_steps = 0
@@ -123,8 +148,12 @@ class CloudEnergyEnv(gym.Env):
         self.last_sla = 0.0
         self.last_switches = 0
         self.last_migrations = 0
+        self.last_vm_count = 0
         self.last_temp = self.config.ambient_temp_c
         self.last_lifetime_penalty = 0.0
+        self.last_priority1_ratio = 0.0
+        self.last_avg_vm_memory = 0.0
+        self.last_migration_penalty_weighted = 0.0
         self.trace: list[dict[str, Any]] = []
 
     @property
@@ -247,56 +276,254 @@ class CloudEnergyEnv(gym.Env):
 
         return switches, wake_from_off
 
-    def _build_vm_demands(self, demand: float) -> np.ndarray:
+    def _load_vm_snapshots(self, path: str | None) -> dict[int, list[dict[str, Any]]]:
+        if not path:
+            return {}
+        p = Path(path)
+        if not p.exists():
+            return {}
+
+        df = pd.read_csv(p)
+        required = {"timestep", "vmTypeId", "priority", "count_active", "core", "memory"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"vm_snapshots.csv thiếu cột: {sorted(missing)}")
+
+        snapshots: dict[int, list[dict[str, Any]]] = {}
+        for row in df.itertuples(index=False):
+            timestep = int(getattr(row, "timestep"))
+            snapshots.setdefault(timestep, []).append(
+                {
+                    "vmTypeId": int(getattr(row, "vmTypeId")),
+                    "priority": int(getattr(row, "priority")),
+                    "count_active": int(getattr(row, "count_active")),
+                    "core": float(getattr(row, "core")),
+                    "memory": float(getattr(row, "memory")),
+                    "has_priority1": int(getattr(row, "has_priority1", int(getattr(row, "priority")) == 1)),
+                }
+            )
+        return snapshots
+
+    def _estimate_memory_scale(self) -> float:
+        if not self.vm_snapshots:
+            return max(self.config.memory_migration_scale, 1e-6)
+
+        memories: list[float] = []
+        for rows in self.vm_snapshots.values():
+            for row in rows:
+                memories.append(float(row.get("memory", 0.0)))
+        if not memories:
+            return max(self.config.memory_migration_scale, 1e-6)
+
+        percentile = float(np.percentile(memories, self.config.obs_memory_percentile))
+        return max(percentile, self.config.memory_migration_scale, 1e-6)
+
+    def _normalize_feature(self, value: float, scale: float) -> float:
+        if scale <= 1e-9:
+            return 0.0
+        norm = value / scale
+        return float(np.clip(norm, 0.0, self.config.obs_clip_high))
+
+    def _build_vm_records(self, demand: float) -> list[dict[str, Any]]:
         if demand <= 0:
-            return np.zeros(0, dtype=np.float32)
+            return []
+
+        global_timestep = self.start_idx + self.step_idx
+        snapshot_rows = self.vm_snapshots.get(global_timestep, [])
+
+        if snapshot_rows:
+            raw_total_core = sum(
+                max(0.0, float(r["count_active"])) * max(0.0, float(r["core"]))
+                for r in snapshot_rows
+            )
+            if raw_total_core > 1e-12:
+                scale = float(demand) / raw_total_core
+                records: list[dict[str, Any]] = []
+                max_chunks = max(1, int(self.config.vm_snapshot_max_chunks_per_type))
+                unit = max(float(self.config.vm_unit_demand), 1e-6)
+
+                for r in snapshot_rows:
+                    vm_type = int(r["vmTypeId"])
+                    priority = int(r["priority"])
+                    count_active = int(r["count_active"])
+                    group_demand = float(count_active) * float(r["core"]) * scale
+                    group_memory = float(count_active) * float(r["memory"]) * scale
+                    if group_demand <= self.config.vm_snapshot_min_group_demand:
+                        continue
+
+                    n_chunks = int(np.ceil(group_demand / unit))
+                    n_chunks = max(1, min(max_chunks, n_chunks))
+                    demand_unit = group_demand / n_chunks
+                    memory_unit = group_memory / n_chunks if n_chunks > 0 else 0.0
+                    count_unit = count_active / n_chunks if n_chunks > 0 else count_active
+
+                    for chunk_id in range(n_chunks):
+                        # Stable ID để so sánh host cũ/mới qua timestep.
+                        vm_id = vm_type * 100_000 + priority * 10_000 + chunk_id
+                        records.append(
+                            {
+                                "vm_id": int(vm_id),
+                                "vm_type_id": int(vm_type),
+                                "priority": int(priority),
+                                "demand": float(demand_unit),
+                                "memory": float(memory_unit),
+                                "represented_count": float(count_unit),
+                                "source": "azure_vm_snapshot",
+                            }
+                        )
+
+                if records:
+                    return records
+
+        # Fallback: pseudo-VM cũ nếu chưa có vm_snapshots.csv.
         n_vms = max(1, int(np.ceil(demand / max(self.config.vm_unit_demand, 1e-6))))
         base = demand / n_vms
-        return np.full(n_vms, base, dtype=np.float32)
+        return [
+            {
+                "vm_id": int(i),
+                "vm_type_id": -1,
+                "priority": 0,
+                "demand": float(base),
+                "memory": float(base),
+                "represented_count": 1.0,
+                "source": "fallback_pseudo_vm",
+            }
+            for i in range(n_vms)
+        ]
 
-    def _pack_vms(
-        self, vm_demands: np.ndarray
-    ) -> tuple[np.ndarray, dict[int, int], list[dict[str, int | float]], int]:
+    def _pack_vm_records(
+        self, vm_records: list[dict[str, Any]]
+    ) -> tuple[np.ndarray, dict[int, int], list[dict[str, int | float | str]], int, list[dict[str, Any]], dict[str, int]]:
+        
+        # Migration-aware Best-Fit Consolidation.
+        # - Ưu tiên giữ VM ở host cũ nếu host đó active và còn đủ tài nguyên.
+        # - Nếu không giữ được, chọn host active có phần tài nguyên dư sau khi đặt là nhỏ nhất.
+        # - Nếu VM đổi host so với prev_assignment thì ghi migration event.
+        
         active_idx = self._active_indices()
         host_loads = np.zeros(self.config.max_hosts, dtype=np.float32)
 
-        if active_idx.size == 0 or vm_demands.size == 0:
-            return host_loads, {}, [], 0
+        if active_idx.size == 0 or not vm_records:
+            return host_loads, {}, [], 0, [], {}
 
         host_capacity = self.config.host_nominal_capacity * self.dvfs
-        remaining = np.full(active_idx.size, host_capacity, dtype=np.float32)
+        remaining = {int(h): float(host_capacity) for h in active_idx}
+
+        # VM lớn và priority cao được xếp trước.
+        sorted_records = sorted(
+            vm_records,
+            key=lambda r: (
+                0 if int(r.get("priority", 0)) == 1 else 1,
+                -float(r.get("demand", 0.0)),
+            ),
+        )
 
         assignment: dict[int, int] = {}
-        migration_plan: list[dict[str, int | float]] = []
+        migration_events: list[dict[str, int | float | str]] = []
+        vm_states: list[dict[str, Any]] = []
         migrations = 0
 
-        for vm_id, demand_unit in enumerate(vm_demands):
-            feasible = remaining >= (demand_unit - 1e-9)
-
-            if np.any(feasible):
-                slack = np.where(feasible, remaining - demand_unit, np.inf)
-                local_idx = int(np.argmin(slack))
-            else:
-                local_idx = int(np.argmax(host_loads[active_idx]))
-
-            host = int(active_idx[local_idx])
-            remaining[local_idx] -= demand_unit
-            host_loads[host] += demand_unit
-            assignment[vm_id] = host
-
+        for record in sorted_records:
+            vm_id = int(record["vm_id"])
+            demand_unit = float(record["demand"])
             previous_host = self.prev_assignment.get(vm_id)
-            if previous_host is not None and previous_host != host:
+
+            chosen_host: int | None = None
+
+            # 1) Migration-aware: giữ VM ở host cũ nếu còn active và đủ chỗ.
+            if previous_host is not None and previous_host in remaining:
+                if remaining[previous_host] >= demand_unit - 1e-9:
+                    chosen_host = int(previous_host)
+
+            # 2) Best-fit: chọn host còn đủ chỗ và dư ít nhất sau khi đặt.
+            if chosen_host is None:
+                feasible_hosts = [h for h, rem in remaining.items() if rem >= demand_unit - 1e-9]
+                if feasible_hosts:
+                    chosen_host = min(feasible_hosts, key=lambda h: remaining[h] - demand_unit)
+                else:
+                    # Nếu VM group quá lớn, đặt vào host còn dư nhiều nhất và cho phép overload nhẹ.
+                    chosen_host = max(remaining.keys(), key=lambda h: remaining[h])
+
+            remaining[chosen_host] -= demand_unit
+            host_loads[chosen_host] += demand_unit
+            assignment[vm_id] = int(chosen_host)
+
+            if previous_host is not None and previous_host != chosen_host:
                 migrations += 1
-                migration_plan.append(
+                migration_events.append(
                     {
                         "vm_id": int(vm_id),
+                        "vm_type_id": int(record.get("vm_type_id", -1)),
+                        "priority": int(record.get("priority", 0)),
                         "from": int(previous_host),
-                        "to": int(host),
+                        "to": int(chosen_host),
                         "demand": float(demand_unit),
+                        "memory": float(record.get("memory", 0.0)),
+                        "represented_count": float(record.get("represented_count", 1.0)),
+                        "source": str(record.get("source", "unknown")),
                     }
                 )
 
-        return host_loads, assignment, migration_plan, migrations
+            vm_states.append(
+                {
+                    "vm_id": int(vm_id),
+                    "vm_type_id": int(record.get("vm_type_id", -1)),
+                    "priority": int(record.get("priority", 0)),
+                    "host_id": int(chosen_host),
+                    "demand": float(demand_unit),
+                    "memory": float(record.get("memory", 0.0)),
+                    "represented_count": float(record.get("represented_count", 1.0)),
+                    "source": str(record.get("source", "unknown")),
+                }
+            )
+
+        vm_to_host_map = {str(vm_id): int(host) for vm_id, host in assignment.items()}
+        return host_loads, assignment, migration_events, migrations, vm_states, vm_to_host_map
+
+    def _update_vm_stats(self, vm_states: list[dict[str, Any]]):
+        if not vm_states:
+            self.last_vm_count = 0
+            self.last_priority1_ratio = 0.0
+            self.last_avg_vm_memory = 0.0
+            return
+
+        self.last_vm_count = len(vm_states)
+        total_demand = 0.0
+        priority1_demand = 0.0
+        memories: list[float] = []
+        for vm in vm_states:
+            demand = float(vm.get("demand", 0.0))
+            total_demand += demand
+            if int(vm.get("priority", 0)) == 1:
+                priority1_demand += demand
+            memories.append(float(vm.get("memory", 0.0)))
+
+        self.last_priority1_ratio = (
+            priority1_demand / total_demand if total_demand > 1e-8 else 0.0
+        )
+        avg_memory = float(np.mean(memories)) if memories else 0.0
+        self.last_avg_vm_memory = self._normalize_feature(avg_memory, self.obs_memory_scale)
+
+    def _host_state_snapshot(self, host_utils: np.ndarray | None = None) -> list[dict[str, Any]]:
+        status_name = {
+            self.STATUS_OFF: "off",
+            self.STATUS_SLEEP: "sleep",
+            self.STATUS_ACTIVE: "active",
+        }
+        rows: list[dict[str, Any]] = []
+        for i in range(self.config.max_hosts):
+            util = 0.0 if host_utils is None else float(host_utils[i])
+            rows.append(
+                {
+                    "host_id": int(i),
+                    "status": status_name.get(int(self.host_status[i]), "unknown"),
+                    "load": float(self.host_loads[i]),
+                    "utilization": util,
+                    "temperature": float(self.host_temps[i]),
+                    "age": float(self.host_age[i]),
+                }
+            )
+        return rows
 
     def _update_temperatures(self):
         for i in range(self.config.max_hosts):
@@ -462,7 +689,13 @@ class CloudEnergyEnv(gym.Env):
                 self.last_pue / 3.0,
                 temp_ratio,
                 mean_host_age,
-                self.last_migrations / max(self.config.max_hosts, 1),
+                self._normalize_feature(
+                    float(self.last_migrations), float(max(self.last_vm_count, 1))
+                ),
+
+                self.last_priority1_ratio,           
+                self.last_avg_vm_memory,             
+                self.last_migration_penalty_weighted,  
             ],
             dtype=np.float32,
         )
@@ -481,13 +714,21 @@ class CloudEnergyEnv(gym.Env):
         demand = self._get_demand(0)
         self._reset_hosts(demand)
 
-        # Phải đặt sau _reset_hosts()
         self.prev_active_hosts = int(self.active_hosts)
         self.prev_dvfs = float(self.dvfs)
         self.same_config_steps = 0
 
-        vm_demands = self._build_vm_demands(demand)
-        self.host_loads, self.prev_assignment, _, self.last_migrations = self._pack_vms(vm_demands)
+        vm_records = self._build_vm_records(demand)
+        (
+            self.host_loads,
+            self.prev_assignment,
+            _,
+            self.last_migrations,
+            vm_states,
+            _,
+        ) = self._pack_vm_records(vm_records)
+        self._update_vm_stats(vm_states)
+        self.last_migration_penalty_weighted = 0.0
 
         self._update_temperatures()
         self.last_lifetime_penalty = self._update_age()
@@ -502,12 +743,30 @@ class CloudEnergyEnv(gym.Env):
     def step(self, action: int):
         assert self.action_space.contains(action), f"Action không hợp lệ: {action}"
 
-        switches, wake_from_off = self._apply_action(int(action))
+        action = int(action)
+
+        invalid_action_penalty = 0.0
+        if action == self.ACTION_WAKE_ONE and self.sleep_hosts == 0:
+            invalid_action_penalty = 0.05
+        elif action == self.ACTION_SLEEP_ONE and self.active_hosts <= self.config.min_active_hosts:
+            invalid_action_penalty = 0.05
+        elif action == self.ACTION_DVFS_UP and self.dvfs_idx >= len(self.config.dvfs_levels) - 1:
+            invalid_action_penalty = 0.05
+        elif action == self.ACTION_DVFS_DOWN and self.dvfs_idx <= 0:
+            invalid_action_penalty = 0.05
+        elif action == self.ACTION_POWER_OFF_ONE and self.sleep_hosts <= self.config.min_sleep_hosts:
+            invalid_action_penalty = 0.05
+        elif action == self.ACTION_BOOT_ONE and self.off_hosts == 0:
+            invalid_action_penalty = 0.05
+
+        switches, wake_from_off = self._apply_action(action)
+
         demand = self._get_demand(0)
 
-        vm_demands = self._build_vm_demands(demand)
-        self.host_loads, assignment, migration_plan, migrations = self._pack_vms(vm_demands)
+        vm_records = self._build_vm_records(demand)
+        self.host_loads, assignment, migration_events, migrations, vm_states, vm_to_host_map = self._pack_vm_records(vm_records)
         self.prev_assignment = assignment
+        self._update_vm_stats(vm_states)
 
         self._update_temperatures()
         lifetime_penalty = self._update_age()
@@ -515,7 +774,6 @@ class CloudEnergyEnv(gym.Env):
         power_it, power_total, mean_util, host_utils, pue, cooling_power = self._compute_power(demand)
         sla = self._sla_violation(demand)
 
-        # Sticky-config penalty: phải tính trước reward
         if int(self.active_hosts) == int(self.prev_active_hosts) and float(self.dvfs) == float(self.prev_dvfs):
             self.same_config_steps += 1
         else:
@@ -542,6 +800,17 @@ class CloudEnergyEnv(gym.Env):
         cap = self._cluster_capacity()
         spare_ratio = max(0.0, cap - demand) / max(cap, 1e-8)
         overprovision_penalty = max(0.0, spare_ratio - 0.05)
+        if cap <= 1e-8:
+            util_ratio = 1.0
+            latency_penalty = self.config.latency_cap
+        else:
+            util_ratio = max(demand / cap, 0.0)
+            if util_ratio >= 1.0:
+                latency_penalty = self.config.latency_cap
+            else:
+                util_clipped = min(util_ratio, self.config.latency_util_clip)
+                latency_penalty = util_clipped / max(1.0 - util_clipped, 1e-8)
+                latency_penalty = min(latency_penalty, self.config.latency_cap)
 
         dvfs_penalty, desired_dvfs, dvfs_mismatch = self._dvfs_penalty(demand, mean_util)
 
@@ -570,31 +839,72 @@ class CloudEnergyEnv(gym.Env):
         if action == self.ACTION_POWER_OFF_ONE and sla < 0.01 and spare_ratio > 0.08:
             power_off_bonus = 0.05
 
-        switch_penalty = switches * self.config.host_switch_cost
-        migration_penalty = migrations * self.config.migration_cost
+        migration_penalty = 0.0
+        for event in migration_events:
+            priority_factor = (
+                self.config.priority_migration_multiplier
+                if int(event.get("priority", 0)) == 1
+                else 1.0
+                )
+            mem = float(event.get("memory", self.config.memory_migration_scale))
+            size_factor = min(
+                mem / max(self.config.memory_migration_scale, 1e-9),
+                self.config.migration_max_size_factor,
+                )
+            migration_penalty += self.config.migration_cost * priority_factor * size_factor
+        max_penalty_per_vm = (
+            self.config.migration_cost
+            * max(self.config.priority_migration_multiplier, 1.0)
+            * max(self.config.migration_max_size_factor, 1.0)
+        )
+        migration_scale = max_penalty_per_vm * max(len(vm_states), 1)
+        self.last_migration_penalty_weighted = self._normalize_feature(
+            migration_penalty, migration_scale
+        )
 
-        reward = -(
-            self.config.reward_w_energy * normalized_energy
-            + self.config.reward_w_sla * sla
-            + self.config.reward_w_switch * switch_penalty
-            + self.config.reward_w_migration * migration_penalty
-            + self.config.reward_w_temp * thermal_penalty
-            + self.config.reward_w_lifetime * lifetime_penalty / max(self.config.max_hosts, 1)
-            + self.config.reward_w_overprovision * overprovision_penalty
-            + self.config.reward_w_dvfs * dvfs_penalty
-            + self.config.reward_w_dvfs_mismatch * dvfs_mismatch
-            + self.config.reward_w_active_excess * active_excess_penalty
-            + self.config.reward_w_sleep_excess * sleep_excess_penalty
-            + self.config.reward_w_sticky_config * sticky_config_penalty
-            + 0.30 * wake_penalty
-        ) + self.config.reward_w_util * (
-            0.65 * utilization_bonus + 0.35 * balanced_util_bonus
-        ) + self.config.reward_w_off_bonus * off_bonus + power_off_bonus
+        sla_penalty = sla * (
+            1.0
+            + self.config.sla_penalty_growth_factor
+            * max(0.0, sla - self.config.sla_penalty_growth_threshold)
+        )
+        latency_clipped = min(latency_penalty / self.config.latency_cap, 1.0)
 
-        if sla > 0.10:
-            reward -= 4.0
-        if sla > 0.20:
-            reward -= 8.0
+        combined_util_bonus = (
+            0.5 * min(mean_util, 1.0)
+            + 0.5 * max(0.0, 1.0 - abs(mean_util - 0.78) / 0.78)
+        )
+
+        migration_penalty_norm = self.last_migration_penalty_weighted
+        lifetime_penalty_norm = lifetime_penalty / max(self.config.max_hosts, 1)
+
+        reward = (
+            -(
+                self.config.reward_w_energy * normalized_energy
+                + self.config.reward_w_sla * sla_penalty
+                + self.config.reward_w_latency * latency_clipped
+                + self.config.reward_w_switch * (switches / max(self.config.max_hosts, 1))
+                + self.config.reward_w_migration * migration_penalty_norm
+                + self.config.reward_w_temp * thermal_penalty
+                + self.config.reward_w_lifetime * lifetime_penalty_norm
+                + self.config.reward_w_overprovision * overprovision_penalty
+                + self.config.reward_w_dvfs * dvfs_penalty
+                + self.config.reward_w_dvfs_mismatch * dvfs_mismatch
+                + self.config.reward_w_active_excess * active_excess_penalty
+                + self.config.reward_w_sleep_excess * sleep_excess_penalty
+                + self.config.reward_w_sticky_config * sticky_config_penalty
+                + 0.30 * wake_penalty
+                + invalid_action_penalty
+            )
+            + self.config.reward_w_util * combined_util_bonus
+            + self.config.reward_w_off_bonus * off_bonus
+            + power_off_bonus
+        )
+
+        if sla > self.config.sla_extra_threshold_1:
+            reward -= self.config.sla_extra_penalty_1 * sla
+
+        if sla > self.config.sla_extra_threshold_2:
+            reward -= self.config.sla_extra_penalty_2 * sla
 
         info = {
             "dvfs_penalty": dvfs_penalty,
@@ -624,7 +934,15 @@ class CloudEnergyEnv(gym.Env):
             "sla": sla,
             "spare_ratio": spare_ratio,
             "overprovision_penalty": overprovision_penalty,
-            "migration_plan": migration_plan,
+            "util_ratio": util_ratio,
+            "latency_penalty": latency_penalty,
+            "migration_plan": migration_events,
+            "migration_events": migration_events,
+            "migration_cost": migration_penalty,
+            "vm_to_host_map": vm_to_host_map,
+            "vm_states": vm_states,
+            "host_states": self._host_state_snapshot(host_utils),
+            "uses_vm_snapshots": self.uses_vm_snapshots,
             "cooling_power": cooling_power,
             "host_loads": self.host_loads.copy().tolist(),
             "host_temps": self.host_temps.copy().tolist(),

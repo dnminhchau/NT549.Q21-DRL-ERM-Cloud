@@ -18,6 +18,7 @@ class EpisodeMetrics:
     avg_temp: float
     total_switches: int
     total_migrations: int
+    total_migration_cost: float = 0.0
 
 
 class FixedPolicy:
@@ -29,11 +30,6 @@ class FixedPolicy:
 
 
 class RoundRobinPolicy:
-    """
-    Baseline heuristic kiểu Round Robin ở mức cluster:
-    - tải tăng thì ưu tiên wake/boot luân phiên
-    - tải giảm thì ưu tiên sleep/power off luân phiên
-    """
 
     def __init__(self):
         self.cursor = 0
@@ -46,47 +42,46 @@ class RoundRobinPolicy:
         sla_ratio = float(obs[5])
         sleep_ratio = float(obs[8])
         off_ratio = float(obs[9])
-        temp_ratio = float(obs[11])
 
         self.cursor = (self.cursor + 1) % 4
 
-        rising = demand_next > demand_now + 0.03
-        high_load = demand_now > 0.82 or rising
-        very_high_load = demand_now > 0.92 or sla_ratio > 0.03
+        rising = demand_next > demand_now + 0.05
+        high_load = demand_now > 0.85 or rising
+        very_high_load = demand_now > 0.95 or sla_ratio > 0.03
 
+        # Khi tải rất cao hoặc SLA xấu thì tăng tài nguyên.
         if very_high_load:
+            if sleep_ratio > 0.0:
+                return 1, None  # WAKE_ONE
             if off_ratio > 0.0 and self.cursor % 2 == 0:
-                return 6, None
-            return 1, None
+                return 6, None  # BOOT_ONE
+            if dvfs_ratio < 0.98:
+                return 3, None  # DVFS_UP
+            return 0, None
 
+        # Khi tải tăng thì wake/boot nhẹ.
         if high_load and active_ratio < 0.95:
-            return 1, None
+            if sleep_ratio > 0.0:
+                return 1, None  # WAKE_ONE
+            if off_ratio > 0.0 and self.cursor % 2 == 0:
+                return 6, None  # BOOT_ONE
+            return 0, None
 
-        if demand_now > 0.78 and dvfs_ratio < 0.98 and temp_ratio < 0.80:
-            return 3, None
+        # RoundRobin basic không nên quá chủ động power-off.
+        # Chỉ sleep khi tải rất thấp.
+        if demand_now < 0.25 and active_ratio > 0.35:
+            return 2, None  # SLEEP_ONE
 
-        if temp_ratio > 0.82:
-            return 4, None
+        # DVFS_DOWN chỉ khi tải rất thấp.
+        if demand_now < 0.30 and dvfs_ratio > 0.60:
+            return 4, None  # DVFS_DOWN
 
-        if demand_now < 0.30 and active_ratio > 0.25:
-            if sleep_ratio > 0.20 and self.cursor % 2 == 1:
-                return 5, None
-            return 2, None
-
-        if demand_now < 0.45 and dvfs_ratio > 0.60:
-            return 4, None
-
-        return 0, None
+        return 0, None  # KEEP
 
 
 class ThresholdPolicy:
-    """
-    Baseline ngưỡng đơn giản:
-    - phản ứng chủ yếu theo demand/SLA
-    - ít quan tâm nhiệt độ và migration hơn BestFit
-    """
-
-    def __init__(self, high: float = 0.80, low: float = 0.32):
+    
+    def __init__(self, high: float = 0.85, low: float = 0.25):
         self.high = high
         self.low = low
 
@@ -102,33 +97,25 @@ class ThresholdPolicy:
         if demand_now > self.high or demand_next > self.high or sla_ratio > 0.02:
             if active_ratio < 0.95:
                 if sleep_ratio > 0.0:
-                    return 1, None
+                    return 1, None  # WAKE_ONE
                 if off_ratio > 0.0:
-                    return 6, None
-                return 1, None
+                    return 6, None  # BOOT_ONE
+                return 1, None  # fallback WAKE_ONE
             if dvfs_ratio < 0.98 and sla_ratio > 0.01:
-                return 3, None
+                return 3, None  # DVFS_UP
 
         if demand_now < self.low:
+            if active_ratio > 0.35:
+                return 2, None  # SLEEP_ONE
             if dvfs_ratio > 0.60:
-                return 4, None
-            if active_ratio > 0.30:
-                return 2, None
-            if sleep_ratio > 0.15:
-                return 5, None
+                return 4, None  # DVFS_DOWN
 
-        return 0, None
+        return 0, None  # KEEP
 
 
 class BestFitPolicy:
-    """
-    Heuristic gần với Best Fit ở mức cluster:
-    - ước lượng số active host mong muốn từ demand / target_util
-    - ưu tiên gom tải vừa đủ để giảm overprovision
-    - có xét thêm PUE, nhiệt độ và migration
-    """
 
-    def __init__(self, target_util: float = 0.78):
+    def __init__(self, target_util: float = 0.70):
         self.target_util = target_util
 
     def predict(self, obs: np.ndarray):
@@ -136,52 +123,36 @@ class BestFitPolicy:
         demand_next = float(obs[1])
         active_ratio = float(obs[2])
         dvfs_ratio = float(obs[3])
-        power_ratio = float(obs[4])
         sla_ratio = float(obs[5])
         sleep_ratio = float(obs[8])
         off_ratio = float(obs[9])
-        pue_ratio = float(obs[10]) * 3.0
-        temp_ratio = float(obs[11])
-        migration_ratio = float(obs[13])
 
-        effective_demand = max(demand_now, 0.65 * demand_now + 0.35 * demand_next)
-        desired_ratio = np.clip(effective_demand / max(self.target_util, 1e-8), 0.125, 1.0)
+        # BestFit basic: ước lượng số host cần dựa trên demand.
+        effective_demand = max(demand_now, demand_next)
+        desired_ratio = float(
+            np.clip(effective_demand / max(self.target_util, 1e-8), 0.125, 1.0)
+        )
 
-        if desired_ratio > active_ratio + 0.10 or sla_ratio > 0.025:
+        # Nếu thiếu tài nguyên hoặc SLA xấu thì wake/boot.
+        if sla_ratio > 0.015 or desired_ratio > active_ratio + 0.10:
             if sleep_ratio > 0.0:
-                return 1, None
+                return 1, None  # WAKE_ONE
             if off_ratio > 0.0:
-                return 6, None
-            if dvfs_ratio < 0.98 and temp_ratio < 0.82:
-                return 3, None
+                return 6, None  # BOOT_ONE
+            if dvfs_ratio < 0.98 and sla_ratio > 0.005:
+                return 3, None  # DVFS_UP
             return 0, None
 
-        if desired_ratio < active_ratio - 0.12:
-            if dvfs_ratio > 0.60 and demand_now < 0.55:
-                return 4, None
-            if active_ratio > 0.25:
-                return 2, None
-            if sleep_ratio > 0.15 and pue_ratio > 1.22:
-                return 5, None
+        # Nếu dư tài nguyên rõ ràng thì sleep bớt host.
+        if desired_ratio < active_ratio - 0.18:
+            if active_ratio > 0.35:
+                return 2, None  # SLEEP_ONE
 
-        if temp_ratio > 0.84:
-            if active_ratio < 0.95:
-                return 1, None
-            return 4, None
-
-        if migration_ratio > 0.45 and dvfs_ratio > 0.60:
-            return 4, None
-
-        if demand_now > 0.94 and dvfs_ratio < 0.98 and temp_ratio < 0.80 and sla_ratio > 0.005:
-            return 3, None
-
-        if demand_now < 0.38 and power_ratio > 0.22 and dvfs_ratio > 0.60:
-            return 4, None
+        # Chỉ giảm DVFS khi tải thấp rõ ràng.
+        if demand_now < 0.35 and dvfs_ratio > 0.60:
+            return 4, None  # DVFS_DOWN
 
         return 0, None
-
-
-BestFitLikePolicy = BestFitPolicy
 
 
 def run_policy(env, policy) -> EpisodeMetrics:
@@ -199,6 +170,7 @@ def run_policy(env, policy) -> EpisodeMetrics:
     temps = []
     switches = 0
     migrations = 0
+    migration_cost = 0.0
 
     while not done:
         if hasattr(policy, "policy"):
@@ -223,6 +195,7 @@ def run_policy(env, policy) -> EpisodeMetrics:
         temps.append(float(info["avg_temp"]))
         switches += int(info["switches"])
         migrations += int(info["migrations"])
+        migration_cost += float(info.get("migration_cost", 0.0))
 
     return EpisodeMetrics(
         total_reward=float(total_reward),
@@ -237,4 +210,5 @@ def run_policy(env, policy) -> EpisodeMetrics:
         avg_temp=float(np.mean(temps)) if temps else 0.0,
         total_switches=int(switches),
         total_migrations=int(migrations),
+        total_migration_cost=float(migration_cost),
     )
