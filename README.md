@@ -23,11 +23,9 @@
 
 ---
 
-## 📦 Dataset
+## 📦 Link các file liên quan
 
-Do kích thước file quá lớn (>100MB), dataset không được lưu trực tiếp trong repository.
-
-👉 Tải dataset tại: https://drive.google.com/drive/folders/1cdP3E-oYdnmFC0NTsnBnOJTCsm5xvUZY?usp=sharing
+👉 Download tại: https://drive.google.com/drive/folders/1cdP3E-oYdnmFC0NTsnBnOJTCsm5xvUZY?usp=drive_link
 
 ---
 
