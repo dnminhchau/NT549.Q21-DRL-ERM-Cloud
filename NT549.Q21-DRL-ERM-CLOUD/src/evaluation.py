@@ -32,8 +32,26 @@ def trace_to_dataframe(trace: list[dict]) -> pd.DataFrame:
                 "uses_vm_snapshots": item.get("uses_vm_snapshots", False),
                 "mean_host_age": item.get("mean_host_age", 0.0),
                 "latency_penalty": item.get("latency_penalty", 0.0),
+                "action": item.get("action", -1),
+                "action_name": item.get("action_name", "UNKNOWN"),
+                "action_valid": item.get("action_valid", True),
+                "reward_total": item.get("reward_total", 0.0),
+                "invalid_action_penalty": item.get("reward_components", {}).get(
+                    "invalid_action_penalty", item.get("invalid_action_penalty", 0.0)
+                ),
             }
         )
+        reward_components = item.get("reward_components", {}) or {}
+        for key, value in reward_components.items():
+            rows[-1][f"reward_component_{key}"] = value
+
+        reward_weighted_components = item.get("reward_weighted_components", {}) or {}
+        for key, value in reward_weighted_components.items():
+            rows[-1][f"reward_weighted_{key}"] = value
+
+        reward_groups = item.get("reward_groups", {}) or {}
+        for key, value in reward_groups.items():
+            rows[-1][f"reward_group_{key}"] = value
     return pd.DataFrame(rows)
 
 
@@ -58,6 +76,10 @@ def save_trace_artifacts(trace: list[dict], output_dir: str | Path, prefix: str 
         ("sleep_hosts", "Số host sleep theo thời gian"),
         ("max_temp", "Nhiệt độ lớn nhất theo thời gian"),
         ("mean_host_age", "Tuổi thọ hao mòn trung bình theo thời gian"),
+        ("reward_group_qos_sla_latency_cost", "Nhóm reward QoS/SLA/latency"),
+        ("reward_group_energy_cost", "Nhóm reward energy/DVFS/overprovision"),
+        ("reward_group_operational_overhead_cost", "Nhóm reward overhead: switch/migration/invalid"),
+        ("reward_group_thermal_lifetime_cost", "Nhóm reward thermal/lifetime"),
     ]
     for col, title in charts:
         if col not in df.columns:

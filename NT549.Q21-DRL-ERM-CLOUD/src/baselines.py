@@ -155,6 +155,56 @@ class BestFitPolicy:
         return 0, None
 
 
+class RandomValidPolicy:
+    """Random baseline that samples only currently valid actions when a mask is available."""
+
+    def __init__(self, seed: int = 42):
+        self.rng = np.random.default_rng(seed)
+
+    def predict(self, obs: np.ndarray, action_mask: np.ndarray | None = None):
+        if action_mask is not None:
+            valid_actions = np.flatnonzero(np.asarray(action_mask, dtype=bool))
+            if valid_actions.size > 0:
+                return int(self.rng.choice(valid_actions)), None
+        return int(self.rng.integers(0, 7)), None
+
+
+def predict_action_safely(policy, env, obs: np.ndarray, deterministic: bool = True) -> int:
+    """Predict one action while respecting action masks when possible.
+
+    Supports:
+    - heuristic policies with predict(obs),
+    - RandomValidPolicy with predict(obs, action_mask=...),
+    - Stable-Baselines3 PPO with predict(obs, deterministic=True),
+    - sb3-contrib MaskablePPO with predict(obs, deterministic=True, action_masks=...).
+    """
+    action_mask = env.action_masks() if hasattr(env, "action_masks") else None
+
+    if isinstance(policy, RandomValidPolicy):
+        action, _ = policy.predict(obs, action_mask=action_mask)
+        return int(np.asarray(action).item())
+
+    if hasattr(policy, "policy"):
+        try:
+            if action_mask is not None:
+                action, _ = policy.predict(
+                    obs,
+                    deterministic=deterministic,
+                    action_masks=action_mask,
+                )
+            else:
+                action, _ = policy.predict(obs, deterministic=deterministic)
+        except TypeError:
+            action, _ = policy.predict(obs, deterministic=deterministic)
+    else:
+        try:
+            action, _ = policy.predict(obs)
+        except TypeError:
+            action, _ = policy.predict(obs, action_mask=action_mask)
+
+    return int(np.asarray(action).item())
+
+
 def run_policy(env, policy) -> EpisodeMetrics:
     obs, _ = env.reset(seed=42)
     done = False
@@ -173,12 +223,7 @@ def run_policy(env, policy) -> EpisodeMetrics:
     migration_cost = 0.0
 
     while not done:
-        if hasattr(policy, "policy"):
-            action, _ = policy.predict(obs, deterministic=True)
-        else:
-            action, _ = policy.predict(obs)
-
-        action = int(np.asarray(action).item())
+        action = predict_action_safely(policy, env, obs, deterministic=True)
 
         obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
